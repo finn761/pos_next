@@ -286,6 +286,16 @@ def get_item_detail(item, doc=None, warehouse=None, price_list=None, company=Non
 	res["serial_no_data"] = serial_no_data
 	res["item_group"] = item_data.get("item_group")
 	res["brand"] = item_data.get("brand")
+	# Per-item tax template for VAT rate override
+	item_taxes = frappe.get_all("Item Tax", filters={"parent": item_code}, fields=["item_tax_template"], limit=1)
+	if item_taxes:
+		template_name = item_taxes[0].get("item_tax_template")
+		tax_details = frappe.get_all("Item Tax Template Detail", filters={"parent": template_name}, fields=["tax_type", "tax_rate"], limit=1)
+		res["item_tax_template"] = template_name
+		res["item_tax_rate"] = tax_details[0].get("tax_rate", None) if tax_details else None
+	else:
+		res["item_tax_template"] = None
+		res["item_tax_rate"] = None
 
 	# Add UOMs data
 	uoms = frappe.get_all(
@@ -630,6 +640,20 @@ def get_item_variants(template_item, pos_profile):
 			)
 			stock_map = {s["item_code"]: s["actual_qty"] for s in stocks}
 
+
+		# Bulk tax lookup for variants
+		_vtax_map = {}
+		if variant_codes:
+			_vitax = frappe.get_all("Item Tax", filters={"parent": ["in", variant_codes]}, fields=["parent", "item_tax_template"])
+			_vtnames = list(set(t.item_tax_template for t in _vitax if t.item_tax_template))
+			_vtrates = {}
+			if _vtnames:
+				_vtdets = frappe.get_all("Item Tax Template Detail", filters={"parent": ["in", _vtnames]}, fields=["parent", "tax_rate"])
+				for td in _vtdets:
+					_vtrates[td.parent] = td.tax_rate
+			for it in _vitax:
+				_vtax_map[it.parent] = {"item_tax_template": it.item_tax_template, "item_tax_rate": _vtrates.get(it.item_tax_template)}
+
 		# Enrich each variant with attributes, price, stock, and UOMs
 		for variant in variants:
 			# Get variant attributes from preloaded map
@@ -655,6 +679,10 @@ def get_item_variants(template_item, pos_profile):
 
 			# Add UOM-specific prices
 			variant["uom_prices"] = uom_prices_map.get(variant["item_code"], {})
+			# Per-variant tax template
+			_vti = _vtax_map.get(variant["item_code"], {})
+			variant["item_tax_template"] = _vti.get("item_tax_template")
+			variant["item_tax_rate"] = _vti.get("item_tax_rate")
 
 		return variants
 	except Exception as e:
@@ -1270,6 +1298,20 @@ def get_items(pos_profile, search_term=None, item_group=None, start=0, limit=20,
 				for attr in attributes:
 					attributes_map.setdefault(attr["parent"], {})[attr["attribute"]] = attr["attribute_value"]
 
+		# Bulk item tax template lookup for per-item VAT rates
+		_tax_codes = [item["item_code"] for item in items]
+		_tax_map = {}
+		if _tax_codes:
+			_itax = frappe.get_all("Item Tax", filters={"parent": ["in", _tax_codes]}, fields=["parent", "item_tax_template"])
+			_tnames = list(set(t.item_tax_template for t in _itax if t.item_tax_template))
+			_trates = {}
+			if _tnames:
+				_tdets = frappe.get_all("Item Tax Template Detail", filters={"parent": ["in", _tnames]}, fields=["parent", "tax_rate"])
+				for td in _tdets:
+					_trates[td.parent] = td.tax_rate
+			for it in _itax:
+				_tax_map[it.parent] = {"item_tax_template": it.item_tax_template, "item_tax_rate": _trates.get(it.item_tax_template)}
+
 		# Enrich items with price, stock, barcode, and UOM data
 		for item in items:
 			stock_uom = item.get("stock_uom")
@@ -1392,6 +1434,11 @@ def get_items(pos_profile, search_term=None, item_group=None, start=0, limit=20,
 
 			# UOM-specific prices map for frontend selector
 			item["uom_prices"] = uom_prices_map.get(item["item_code"], {})
+
+			# Per-item tax rate
+			_tinfo = _tax_map.get(item.get("item_code", ""), {})
+			item["item_tax_template"] = _tinfo.get("item_tax_template")
+			item["item_tax_rate"] = _tinfo.get("item_tax_rate")
 
 			# Variant attributes
 			if item.get("variant_of") and item["item_code"] in attributes_map:
@@ -1564,6 +1611,20 @@ def get_items_bulk(pos_profile, item_groups=None, start=0, limit=2000, include_v
 				for attr in attributes:
 					attributes_map.setdefault(attr["parent"], {})[attr["attribute"]] = attr["attribute_value"]
 
+		# Bulk item tax template lookup for per-item VAT rates
+		_tc2 = [item["item_code"] for item in items]
+		_tm2 = {}
+		if _tc2:
+			_it2 = frappe.get_all("Item Tax", filters={"parent": ["in", _tc2]}, fields=["parent", "item_tax_template"])
+			_tn2 = list(set(t.item_tax_template for t in _it2 if t.item_tax_template))
+			_tr2 = {}
+			if _tn2:
+				_td2 = frappe.get_all("Item Tax Template Detail", filters={"parent": ["in", _tn2]}, fields=["parent", "tax_rate"])
+				for td in _td2:
+					_tr2[td.parent] = td.tax_rate
+			for it in _it2:
+				_tm2[it.parent] = {"item_tax_template": it.item_tax_template, "item_tax_rate": _tr2.get(it.item_tax_template)}
+
 		# Enrich items
 		for item in items:
 			item_code = item["item_code"]
@@ -1594,6 +1655,11 @@ def get_items_bulk(pos_profile, item_groups=None, start=0, limit=2000, include_v
 			all_uoms = uom_map.get(item_code, []) or []
 			item["item_uoms"] = [u for u in all_uoms if u.get("uom") != stock_uom]
 			item["uom_prices"] = prices
+
+			# Per-item tax rate
+			_ti2 = _tm2.get(item.get("item_code", ""), {})
+			item["item_tax_template"] = _ti2.get("item_tax_template")
+			item["item_tax_rate"] = _ti2.get("item_tax_rate")
 
 			# Variant attributes
 			if item.get("variant_of") and item_code in attributes_map:

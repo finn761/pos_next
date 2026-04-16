@@ -292,6 +292,8 @@ export function useInvoice() {
 				actual_qty: item.actual_qty ?? 0,
 				is_stock_item: item.is_stock_item ?? 1,
 				is_bundle: item.is_bundle || false,
+				item_tax_template: item.item_tax_template || null,
+				item_tax_rate: item.item_tax_rate,
 				allow_negative_stock: item.allow_negative_stock || 0,
 			}
 			invoiceItems.value.push(newItem)
@@ -677,7 +679,7 @@ export function useInvoice() {
 
 		// Calculate tax based on inclusive/exclusive mode
 		// Use currency precision for all monetary calculations to match ERPNext
-		const totalTaxRate = calculateTotalTaxRate()
+		const totalTaxRate = (item.item_tax_rate !== undefined && item.item_tax_rate !== null) ? item.item_tax_rate : calculateTotalTaxRate()
 		let netAmount = 0
 		let taxAmount = 0
 
@@ -1214,3 +1216,4 @@ export function useInvoice() {
 		getTaxesResource,
 	}
 }
+// COAG VAT patch v1
