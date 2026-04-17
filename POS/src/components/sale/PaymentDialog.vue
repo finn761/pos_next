@@ -958,6 +958,40 @@
 			<!-- End Two Column Layout -->
 		</template>
 	</Dialog>
+	<!--
+		COAG Cashflows payment overlay — minimal, functional.
+		Full-screen blocker while the SUNMI P3 terminal is awaiting the card tap.
+		Style is deliberately plain for now; polish pass comes later.
+	-->
+	<div
+		v-if="cashflowsInFlight"
+		class="fixed inset-0 bg-black/70 z-[10000] flex items-center justify-center p-4"
+		role="dialog"
+		aria-modal="true"
+		aria-label="Cashflows card payment"
+	>
+		<div class="bg-white rounded-lg shadow-2xl w-full max-w-md p-8 text-center">
+			<div class="text-xs font-semibold tracking-[0.15em] uppercase text-gray-400 mb-3">
+				{{ cashflowsStationId || "STATION" }}
+			</div>
+			<div class="text-6xl font-bold tabular-nums mb-6">
+				{{ formatCurrency((cashflowsAmountPence || 0) / 100) }}
+			</div>
+			<div class="text-xl text-gray-900 mb-8">
+				{{ __("Tap your card") }}
+			</div>
+			<div class="text-sm text-gray-500 mb-8">
+				{{ __("Status") }}: <span class="font-mono">{{ cashflowsStatus || "starting" }}</span>
+			</div>
+			<button
+				type="button"
+				class="px-6 py-2 border border-gray-300 rounded text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-gray-400"
+				@click="cancelCashflowsFlow"
+			>
+				{{ __("Cancel") }}
+			</button>
+		</div>
+	</div>
 </template>
 
 <script setup>
@@ -978,10 +1012,25 @@ import { useLongPress } from "@/composables/useLongPress"
 import { usePaymentNumpad } from "@/composables/usePaymentNumpad"
 import { useResponsivePayment } from "@/composables/useResponsivePayment"
 import { useQuickAmounts } from "@/composables/useQuickAmounts"
+import { useCashflowsPayment, getStationId } from "@/composables/useCashflowsPayment"
 
 const log = logger.create("PaymentDialog")
 const settingsStore = usePOSSettingsStore()
-const { showWarning, showInfo } = useToast()
+const { showWarning, showInfo, showError } = useToast()
+
+// COAG Cashflows payment flow — see POS/src/composables/useCashflowsPayment.js.
+// Intercepts `completePayment` when any payment entry uses the "Cashflows Card"
+// mode of payment and drives the SUNMI P3 terminal bound to this station.
+// Destructured so refs are top-level in <script setup> and auto-unwrap in template.
+const {
+	isInFlight: cashflowsInFlight,
+	status: cashflowsStatus,
+	amountPence: cashflowsAmountPence,
+	stationId: cashflowsStationId,
+	startFlow: startCashflowsFlow,
+	cancel: cancelCashflowsFlow,
+} = useCashflowsPayment()
+const CASHFLOWS_MODE_OF_PAYMENT = "Cashflows Card"
 
 const props = defineProps({
 	modelValue: Boolean,
@@ -2291,7 +2340,7 @@ function clearAll() {
 	customAmount.value = ""
 }
 
-function completePayment() {
+async function completePayment() {
 	log.debug("[PaymentDialog] Complete payment called:", {
 		canComplete: canComplete.value,
 		totalPaid: totalPaid.value,
@@ -2309,6 +2358,64 @@ function completePayment() {
 	if (!canComplete.value) {
 		log.warn("[PaymentDialog] Cannot complete - validation failed")
 		return
+	}
+
+	// -----------------------------------------------------------------
+	// Cashflows intercept
+	//
+	// If any payment entry uses the "Cashflows Card" mode of payment, drive
+	// the physical terminal via the coag_cashflows backend BEFORE emitting
+	// payment-completed. Only on approval do we proceed with invoice submit.
+	// On decline / cancel / timeout / config error we surface a toast and
+	// leave the dialog open so the cashier can retry or choose cash.
+	// -----------------------------------------------------------------
+	const cashflowsEntry = paymentEntries.value.find(
+		(entry) => entry.mode_of_payment === CASHFLOWS_MODE_OF_PAYMENT,
+	)
+	if (cashflowsEntry) {
+		// Guard: only one Cashflows Card entry supported per invoice.
+		const cashflowsCount = paymentEntries.value.filter(
+			(e) => e.mode_of_payment === CASHFLOWS_MODE_OF_PAYMENT,
+		).length
+		if (cashflowsCount > 1) {
+			showError(
+				__("Multiple Cashflows Card payments per invoice are not supported. Combine them into one entry."),
+			)
+			return
+		}
+
+		if (!getStationId()) {
+			showError(
+				__(
+					"This iPad is not bound to a Cashflows station. Open /pos?station=STATION-1 (or STATION-2) to configure.",
+				),
+			)
+			return
+		}
+
+		const amountPence = Math.round(Number(cashflowsEntry.amount || 0) * 100)
+		if (!Number.isFinite(amountPence) || amountPence < 1) {
+			showError(__("Invalid Cashflows payment amount"))
+			return
+		}
+
+		try {
+			const result = await startCashflowsFlow(amountPence)
+			// Stamp the ERPNext-native reference fields so the txn id travels
+			// with the Payment Entry. Custom fields (auth_code, card_brand, etc.)
+			// are stamped onto the POS Invoice server-side by the backend once
+			// it knows the invoice name — see api/payments.py::_write_result_to_invoice.
+			cashflowsEntry.reference_no = result.txn_id
+			cashflowsEntry.reference_date = new Date().toISOString().slice(0, 10)
+			log.debug("[PaymentDialog] Cashflows approved:", {
+				txn_id: result.txn_id,
+				auth_code: result.auth_code,
+			})
+		} catch (err) {
+			log.warn("[PaymentDialog] Cashflows payment failed:", err)
+			showError(err && err.message ? err.message : String(err))
+			return
+		}
 	}
 
 	// Calculate if this is a partial payment (considering write-off)
