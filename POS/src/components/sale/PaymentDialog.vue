@@ -526,6 +526,31 @@
 					]"
 					:style="isMobileView ? {} : { minHeight: rightColumnMinHeight }"
 				>
+					<!--
+						Quick Pay by Card — 99% of COAG sales are single card payments.
+						Instead of making the cashier pick Cashflows Card, type the amount,
+						hit Add, then hit Complete, they tap this one button and go straight
+						to the terminal tap. Manual flow (cash, split, two cards) remains
+						fully available below.
+					-->
+					<button
+						v-if="canQuickPayCashflows"
+						type="button"
+						@click="quickPayCashflows"
+						:class="[
+							'w-full mb-3 rounded-lg shadow-md transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400',
+							'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white',
+							isSmallMobile ? 'py-2' : 'py-3 lg:py-4',
+						]"
+					>
+						<div :class="['font-semibold tracking-wide uppercase text-blue-100', isSmallMobile ? 'text-[10px]' : 'text-xs']">
+							{{ __('Tap to pay by card') }}
+						</div>
+						<div :class="['font-bold tabular-nums', isSmallMobile ? 'text-xl' : 'text-3xl lg:text-4xl']">
+							{{ formatCurrency(props.grandTotal) }}
+						</div>
+					</button>
+
 					<!-- Payment Methods -->
 					<div :class="isSmallMobile ? 'mb-1' : 'mb-1.5 lg:mb-3'">
 						<div :class="['flex items-center justify-between', isSmallMobile ? 'mb-0.5' : 'mb-1 lg:mb-2']">
@@ -1053,6 +1078,43 @@ function stampCashflowsEntry(entry, result, station) {
 	entry.custom_cashflows_card_brand = result.card_brand || ""
 	entry.custom_cashflows_last_4 = result.last_4 || ""
 	entry.custom_cashflows_merchant_id = result.merchant_id || ""
+}
+
+// Quick-pay by Cashflows Card — the 99% case. One tap on the till adds a
+// Cashflows Card payment at the grand total and fires completePayment
+// immediately. Hidden once the cashier starts building a manual breakdown
+// (cash + card split, two-card split, etc.) so the manual path is still
+// fully usable.
+function cashflowsCardMethod() {
+	return (paymentMethods.value || []).find(
+		(m) => m.mode_of_payment === CASHFLOWS_MODE_OF_PAYMENT,
+	)
+}
+
+async function quickPayCashflows() {
+	const method = cashflowsCardMethod()
+	if (!method) {
+		showError(__("Cashflows Card is not configured on this POS Profile"))
+		return
+	}
+	if (!getStationId()) {
+		showError(
+			__(
+				"This iPad is not bound to a Cashflows station. Open /pos?station=STATION-1 (or STATION-2) to configure.",
+			),
+		)
+		return
+	}
+	if (cashflowsInFlight.value) return
+
+	paymentEntries.value.push({
+		mode_of_payment: CASHFLOWS_MODE_OF_PAYMENT,
+		amount: roundCurrency(props.grandTotal),
+		type: method.type || "General",
+		is_wallet_payment: false,
+	})
+	log.debug("[PaymentDialog] Quick-pay by card initiated:", props.grandTotal)
+	await completePayment()
 }
 
 const props = defineProps({
@@ -1918,6 +1980,22 @@ const canComplete = computed(() => {
 
 	// Otherwise require full payment
 	return remainingAmount.value === 0 && paymentEntries.value.length > 0
+})
+
+// Show the Quick-Pay-by-Card button only when it's actually useful:
+//   - No manual payment breakdown started yet
+//   - There's a non-zero amount to take
+//   - Cashflows Card is a configured method on this POS Profile
+//   - Not currently processing a Cashflows flow
+const canQuickPayCashflows = computed(() => {
+	if (cashflowsInFlight.value) return false
+	if (paymentEntries.value.length > 0) return false
+	if (!props.grandTotal || props.grandTotal <= 0) return false
+	return Boolean(
+		(paymentMethods.value || []).some(
+			(m) => m.mode_of_payment === CASHFLOWS_MODE_OF_PAYMENT,
+		),
+	)
 })
 
 const paymentButtonText = computed(() => {
