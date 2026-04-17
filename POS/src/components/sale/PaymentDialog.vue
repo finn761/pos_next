@@ -526,31 +526,6 @@
 					]"
 					:style="isMobileView ? {} : { minHeight: rightColumnMinHeight }"
 				>
-					<!--
-						Quick Pay by Card — 99% of COAG sales are single card payments.
-						Instead of making the cashier pick Cashflows Card, type the amount,
-						hit Add, then hit Complete, they tap this one button and go straight
-						to the terminal tap. Manual flow (cash, split, two cards) remains
-						fully available below.
-					-->
-					<button
-						v-if="canQuickPayCashflows"
-						type="button"
-						@click="quickPayCashflows"
-						:class="[
-							'w-full mb-3 rounded-lg shadow-md transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400',
-							'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white',
-							isSmallMobile ? 'py-2' : 'py-3 lg:py-4',
-						]"
-					>
-						<div :class="['font-semibold tracking-wide uppercase text-blue-100', isSmallMobile ? 'text-[10px]' : 'text-xs']">
-							{{ __('Tap to pay by card') }}
-						</div>
-						<div :class="['font-bold tabular-nums', isSmallMobile ? 'text-xl' : 'text-3xl lg:text-4xl']">
-							{{ formatCurrency(props.grandTotal) }}
-						</div>
-					</button>
-
 					<!-- Payment Methods -->
 					<div :class="isSmallMobile ? 'mb-1' : 'mb-1.5 lg:mb-3'">
 						<div :class="['flex items-center justify-between', isSmallMobile ? 'mb-0.5' : 'mb-1 lg:mb-2']">
@@ -929,6 +904,31 @@
 							</button>
 							</div>
 						</div>
+
+					<!--
+						Quick Pay by Card — 99% of COAG sales are single card.
+						Placed just above the Action Buttons row so the cashier's eyes
+						and thumb end at the same place every sale. Auto-adds a
+						Cashflows Card entry at the grand total and fires completePayment.
+						Hidden once the cashier starts building a manual breakdown.
+					-->
+					<button
+						v-if="canQuickPayCashflows"
+						type="button"
+						@click="quickPayCashflows"
+						:class="[
+							'w-full rounded-lg shadow-md transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400',
+							'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white',
+							isCompactMode ? 'py-2 mt-2' : 'py-3 lg:py-4 mt-4',
+						]"
+					>
+						<div :class="['font-semibold tracking-wide uppercase text-blue-100', isSmallMobile ? 'text-[10px]' : 'text-xs']">
+							{{ __('Tap to pay by card') }}
+						</div>
+						<div :class="['font-bold tabular-nums', isSmallMobile ? 'text-xl' : 'text-3xl lg:text-4xl']">
+							{{ formatCurrency(props.grandTotal) }}
+						</div>
+					</button>
 
 					<!-- Action Buttons - Below Keypad (Desktop only) -->
 					<div :class="['hidden lg:flex items-center gap-2', isCompactMode ? 'mt-2' : 'mt-4']">
