@@ -973,6 +973,9 @@
 		<div class="bg-white rounded-lg shadow-2xl w-full max-w-md p-8 text-center">
 			<div class="text-xs font-semibold tracking-[0.15em] uppercase text-gray-400 mb-3">
 				{{ cashflowsStationId || "STATION" }}
+				<span v-if="cashflowsTotalCards > 1" class="ml-2 text-blue-600">
+					{{ __("Card {0} of {1}", [cashflowsCurrentCard, cashflowsTotalCards]) }}
+				</span>
 			</div>
 			<div class="text-6xl font-bold tabular-nums mb-6">
 				{{ formatCurrency((cashflowsAmountPence || 0) / 100) }}
@@ -1027,10 +1030,30 @@ const {
 	status: cashflowsStatus,
 	amountPence: cashflowsAmountPence,
 	stationId: cashflowsStationId,
+	currentCard: cashflowsCurrentCard,
+	totalCards: cashflowsTotalCards,
 	startFlow: startCashflowsFlow,
 	cancel: cancelCashflowsFlow,
 } = useCashflowsPayment()
 const CASHFLOWS_MODE_OF_PAYMENT = "Cashflows Card"
+
+/**
+ * Stamp a Cashflows transaction result onto a Payment Entry row so the data
+ * flows through to the Sales Invoice Payment child table on submit.
+ * @param {object} entry  — a paymentEntries[] row (mutated in place)
+ * @param {object} result — CashflowsResult from the composable
+ * @param {string} station — STATION-1 / STATION-2 / ...
+ */
+function stampCashflowsEntry(entry, result, station) {
+	entry.reference_no = result.txn_id
+	entry.reference_date = new Date().toISOString().slice(0, 10)
+	entry.custom_cashflows_terminal = station
+	entry.custom_cashflows_txn_id = result.txn_id
+	entry.custom_cashflows_auth_code = result.auth_code || ""
+	entry.custom_cashflows_card_brand = result.card_brand || ""
+	entry.custom_cashflows_last_4 = result.last_4 || ""
+	entry.custom_cashflows_merchant_id = result.merchant_id || ""
+}
 
 const props = defineProps({
 	modelValue: Boolean,
@@ -2309,30 +2332,27 @@ function applyCustomerCredit() {
 }
 
 // Add "Pay on Account" - Credit Sale (invoice with outstanding amount)
+//
+// DISABLED at COAG (fork) — walk-in bar/coffee/gallery sales must never be
+// invoiced on credit. Historically this function emitted `payment-completed`
+// with an empty payments array, which silently submitted an unpaid Sales
+// Invoice (e.g. ACC-SINV-2026-00002 through -00004 during Phase 0 testing).
+//
+// We defence-in-depth:
+//   - Template buttons are already guarded by `allowCreditSale` (POS Settings
+//     sets this to 0 for Coffee / Bar).
+//   - This function now refuses regardless, so even a stale client or buggy
+//     external caller cannot create an unpaid invoice.
+//
+// To re-enable for a specific use case (e.g. an "Art on Approval" workflow),
+// build that as an explicit, opt-in doctype and flow — do not flip this back.
 function addCreditAccountPayment() {
-	log.debug("[PaymentDialog] Add credit account payment (Pay Later):", {
-		grandTotal: props.grandTotal,
-		currentPaid: totalPaid.value,
-		remainingAmount: remainingAmount.value,
-	})
-
-	// Close dialog and complete as credit sale (0 payment)
-	// The backend will create an invoice with outstanding amount
-	const paymentData = {
-		payments: [], // No payments - full amount on credit
-		change_amount: 0,
-		is_partial_payment: false,
-		is_credit_sale: true, // Mark as credit sale
-		paid_amount: 0,
-		outstanding_amount: props.grandTotal,
-	}
-
-	log.debug(
-		"[PaymentDialog] Emitting credit sale payment-completed:",
-		paymentData,
+	log.warn("[PaymentDialog] addCreditAccountPayment called but disabled by COAG fork")
+	showError(
+		__(
+			"Credit sales are disabled. Every sale must be paid (cash or Cashflows Card) before the invoice is submitted.",
+		),
 	)
-	emit("payment-completed", paymentData)
-	show.value = false
 }
 
 function clearAll() {
@@ -2363,28 +2383,21 @@ async function completePayment() {
 	// -----------------------------------------------------------------
 	// Cashflows intercept
 	//
-	// If any payment entry uses the "Cashflows Card" mode of payment, drive
-	// the physical terminal via the coag_cashflows backend BEFORE emitting
-	// payment-completed. Only on approval do we proceed with invoice submit.
-	// On decline / cancel / timeout / config error we surface a toast and
-	// leave the dialog open so the cashier can retry or choose cash.
+	// Any payment entry using "Cashflows Card" drives the SUNMI P3 terminal
+	// bound to this station. Multiple Cashflows entries (split across cards)
+	// are processed SEQUENTIALLY — one tap at a time. Each approved entry is
+	// stamped in place with its own txn_id, auth_code, card_brand, last_4,
+	// and MID. If any entry declines / cancels / times out, we stop and
+	// surface a toast; already-approved entries remain stamped so the
+	// cashier can decide how to proceed (retry the failing card, switch the
+	// remaining to cash, or void the whole thing and refund).
 	// -----------------------------------------------------------------
-	const cashflowsEntry = paymentEntries.value.find(
+	const cashflowsEntries = paymentEntries.value.filter(
 		(entry) => entry.mode_of_payment === CASHFLOWS_MODE_OF_PAYMENT,
 	)
-	if (cashflowsEntry) {
-		// Guard: only one Cashflows Card entry supported per invoice.
-		const cashflowsCount = paymentEntries.value.filter(
-			(e) => e.mode_of_payment === CASHFLOWS_MODE_OF_PAYMENT,
-		).length
-		if (cashflowsCount > 1) {
-			showError(
-				__("Multiple Cashflows Card payments per invoice are not supported. Combine them into one entry."),
-			)
-			return
-		}
-
-		if (!getStationId()) {
+	if (cashflowsEntries.length > 0) {
+		const station = getStationId()
+		if (!station) {
 			showError(
 				__(
 					"This iPad is not bound to a Cashflows station. Open /pos?station=STATION-1 (or STATION-2) to configure.",
@@ -2393,28 +2406,47 @@ async function completePayment() {
 			return
 		}
 
-		const amountPence = Math.round(Number(cashflowsEntry.amount || 0) * 100)
-		if (!Number.isFinite(amountPence) || amountPence < 1) {
-			showError(__("Invalid Cashflows payment amount"))
-			return
+		// Pre-validate all amounts before initiating any terminal call — cheap to
+		// do up-front, avoids charging the first card then failing on maths.
+		for (const entry of cashflowsEntries) {
+			const pence = Math.round(Number(entry.amount || 0) * 100)
+			if (!Number.isFinite(pence) || pence < 1) {
+				showError(__("Invalid Cashflows payment amount"))
+				return
+			}
+			entry.__cashflows_pence = pence
 		}
 
-		try {
-			const result = await startCashflowsFlow(amountPence)
-			// Stamp the ERPNext-native reference fields so the txn id travels
-			// with the Payment Entry. Custom fields (auth_code, card_brand, etc.)
-			// are stamped onto the POS Invoice server-side by the backend once
-			// it knows the invoice name — see api/payments.py::_write_result_to_invoice.
-			cashflowsEntry.reference_no = result.txn_id
-			cashflowsEntry.reference_date = new Date().toISOString().slice(0, 10)
-			log.debug("[PaymentDialog] Cashflows approved:", {
-				txn_id: result.txn_id,
-				auth_code: result.auth_code,
-			})
-		} catch (err) {
-			log.warn("[PaymentDialog] Cashflows payment failed:", err)
-			showError(err && err.message ? err.message : String(err))
-			return
+		for (let i = 0; i < cashflowsEntries.length; i++) {
+			const entry = cashflowsEntries[i]
+			try {
+				const result = await startCashflowsFlow(entry.__cashflows_pence, {
+					index: i + 1,
+					total: cashflowsEntries.length,
+				})
+				stampCashflowsEntry(entry, result, station)
+				log.debug("[PaymentDialog] Cashflows card approved", {
+					index: i + 1,
+					total: cashflowsEntries.length,
+					txn_id: result.txn_id,
+					auth_code: result.auth_code,
+				})
+			} catch (err) {
+				log.warn("[PaymentDialog] Cashflows card failed", { index: i + 1, err })
+				const approved = i
+				const prefix = approved > 0
+					? __("Card {0} of {1} failed. {2} card(s) already charged — decide how to proceed.", [
+						i + 1,
+						cashflowsEntries.length,
+						approved,
+					])
+					: ""
+				const msg = err && err.message ? err.message : String(err)
+				showError(prefix ? `${prefix} (${msg})` : msg)
+				return
+			} finally {
+				delete entry.__cashflows_pence
+			}
 		}
 	}
 

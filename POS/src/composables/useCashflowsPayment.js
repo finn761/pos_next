@@ -78,6 +78,11 @@ export function useCashflowsPayment() {
 	const stationId = ref("")
 	const lastError = ref("")
 
+	// Progression state for multi-card splits. `totalCards === 1` means the
+	// overlay should render without the "Card X of Y" label.
+	const currentCard = ref(1)
+	const totalCards = ref(1)
+
 	// Used to break out of the poll loop on user cancel.
 	let aborted = false
 
@@ -92,17 +97,23 @@ export function useCashflowsPayment() {
 	})
 
 	/**
-	 * Run the full initiate → poll → resolve flow.
+	 * Run the full initiate → poll → resolve flow for a single card.
 	 *
 	 * @param {number} pence       Amount in pence (integer, >= 1).
-	 * @param {string|null} [posInvoice]
+	 * @param {object} [opts]
+	 * @param {string|null} [opts.posInvoice]
 	 *        Optional POS Invoice name. If provided, the backend stamps
 	 *        custom_cashflows_* fields onto the invoice on approval.
+	 * @param {number} [opts.index]  1-based index for progression display.
+	 * @param {number} [opts.total]  Total number of cards in this split.
 	 * @returns {Promise<CashflowsResult>}
 	 * @throws {Error}             Any non-approved outcome (declined, cancelled,
 	 *                             timeout, configuration error) is thrown.
 	 */
-	async function startFlow(pence, posInvoice = null) {
+	async function startFlow(pence, opts = {}) {
+		const posInvoice = opts.posInvoice || null
+		currentCard.value = opts.index || 1
+		totalCards.value = opts.total || 1
 		const station = getStationId()
 		if (!station) {
 			throw new Error(
@@ -183,6 +194,8 @@ export function useCashflowsPayment() {
 		amountPence,
 		stationId,
 		lastError,
+		currentCard,
+		totalCards,
 		startFlow,
 		cancel,
 	}
